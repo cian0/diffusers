@@ -50,7 +50,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--revision",
         type=str,
-        default="fp16",
+        default=None,
         required=False,
         help="Revision of pretrained model identifier from huggingface.co/models.",
     )
@@ -244,6 +244,7 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument("--not_cache_latents", action="store_true", help="Do not precompute and cache latents from VAE.")
+    parser.add_argument("--hflip", action="store_true", help="Apply horizontal flip data augmentation.")
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument(
         "--concepts_list",
@@ -278,7 +279,8 @@ class DreamBoothDataset(Dataset):
         size=512,
         center_crop=False,
         num_class_images=None,
-        pad_tokens=False
+        pad_tokens=False,
+        hflip=False
     ):
         self.size = size
         self.center_crop = center_crop
@@ -304,6 +306,7 @@ class DreamBoothDataset(Dataset):
 
         self.image_transforms = transforms.Compose(
             [
+                transforms.RandomHorizontalFlip(0.5 * hflip),
                 transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
                 transforms.ToTensor(),
@@ -446,7 +449,9 @@ def main(args):
                         args.pretrained_model_name_or_path,
                         vae=AutoencoderKL.from_pretrained(
                             args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
-                            revision=None if args.pretrained_vae_name_or_path else args.revision
+                            subfolder=None if args.pretrained_vae_name_or_path else "vae",
+                            revision=None if args.pretrained_vae_name_or_path else args.revision,
+                            torch_dtype=torch_dtype
                         ),
                         torch_dtype=torch_dtype,
                         safety_checker=None,
@@ -506,6 +511,7 @@ def main(args):
         args.pretrained_model_name_or_path,
         subfolder="unet",
         revision=args.revision,
+        torch_dtype=torch.float32
     )
 
     vae.requires_grad_(False)
@@ -546,7 +552,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    noise_scheduler = DDPMScheduler.from_config("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     train_dataset = DreamBoothDataset(
         concepts_list=args.concepts_list,
@@ -555,7 +561,8 @@ def main(args):
         size=args.resolution,
         center_crop=args.center_crop,
         num_class_images=args.num_class_images,
-        pad_tokens=args.pad_tokens
+        pad_tokens=args.pad_tokens,
+        hflip=args.hflip
     )
 
     def collate_fn(examples):
@@ -571,7 +578,11 @@ def main(args):
         pixel_values = torch.stack(pixel_values)
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-        input_ids = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt").input_ids
+        input_ids = tokenizer.pad(
+            {"input_ids": input_ids},
+            padding=True,
+            return_tensors="pt",
+        ).input_ids
 
         batch = {
             "input_ids": input_ids,
@@ -679,7 +690,7 @@ def main(args):
                 vae=AutoencoderKL.from_pretrained(
                     args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
                     subfolder=None if args.pretrained_vae_name_or_path else "vae",
-                    revision=None if args.pretrained_vae_name_or_path else args.revision
+                    revision=None if args.pretrained_vae_name_or_path else args.revision,
                 ),
                 safety_checker=None,
                 scheduler=scheduler,
